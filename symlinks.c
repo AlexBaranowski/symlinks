@@ -1,3 +1,6 @@
+#define _FILE_OFFSET_BITS 64
+#define _LARGEFILE_SOURCE
+#define _LARGEFILE64_SOURCE
 #include <unistd.h>
 #ifndef _POSIX_SOURCE
 #define _POSIX_SOURCE
@@ -23,10 +26,10 @@
 #define PATH_MAX 1024
 #endif
 
-#define progver "%s: scan/change symbolic links - v1.3 - by Mark Lord\n\n"
+#define progver "%s: scan/change symbolic links - v1.7 - by Mark Lord\n\n"
 static char *progname;
 static int verbose = 0, fix_links = 0, recurse = 0, delete = 0, shorten = 0,
-		testing = 0, single_fs = 1;
+		testing = 0, single_fs = 1, do_chroot = 0;
 
 /*
  * tidypath removes excess slashes and "." references from a path string
@@ -44,7 +47,7 @@ static int substr (char *s, char *old, char *new)
 		newlen = strlen(new);
 
 	if (newlen > oldlen) {
-		if ((tmp = malloc(strlen(s))) == NULL) {
+		if ((tmp = malloc(strlen(s) + 1)) == NULL) {
 			fprintf(stderr, "no memory\n");
 			exit (1);
 		}
@@ -86,7 +89,7 @@ static int tidy_path (char *path)
 
 	while ((p = strstr(path,"/../")) != NULL) {
 		s = p+3;
-		for (p--; p != path; p--) if (*p == '/') break;
+		while (p != path && *--p != '/');
 		if (*p != '/')
 			break;
 		while ((*p++ = *s++));
@@ -157,10 +160,10 @@ static void fix_symlink (char *path, dev_t my_dev)
 {
 	static char lpath[PATH_MAX], new[PATH_MAX], abspath[PATH_MAX];
 	char *p, *np, *lp, *tail, *msg;
-	struct stat stbuf, lstbuf;
+	struct stat lstbuf;
 	int c, fix_abs = 0, fix_messy = 0, fix_long = 0;
 
-	if ((c = readlink(path, lpath, sizeof(lpath))) == -1) {
+	if ((c = readlink(path, lpath, sizeof(lpath) - 1)) == -1) {
 		perror(path);
 		return;
 	}
@@ -181,15 +184,22 @@ static void fix_symlink (char *path, dev_t my_dev)
 	(void) tidy_path(abspath);
 
 	/* check for various things */
-	if (stat(abspath, &stbuf) == -1) {
-		printf("dangling: %s -> %s\n", path, lpath);
-		if (delete) {
-			if (unlink (path)) {
-				perror(path); 
-			} else
-				printf("deleted:  %s -> %s\n", path, lpath);
+	{
+		struct stat stbuf;
+		if (stat(abspath, &stbuf) == -1) {
+			if (errno != ENOENT) {
+				perror(abspath);
+			} else {
+				printf("dangling: %s -> %s\n", path, lpath);
+				if (delete) {
+					if (unlink (path)) {
+						perror(path); 
+					} else
+						printf("deleted:  %s -> %s\n", path, lpath);
+				}
+				return;
+			}
 		}
-		return;
 	}
 
 	if (single_fs)
@@ -297,35 +307,29 @@ static void dirwalk (char *path, int pathlen, dev_t dev)
 static void usage_error (void)
 {
 	fprintf(stderr, progver, progname);
-	fprintf(stderr, "Usage:\t%s [-cdorstv] dirlist\n\n", progname);
+	fprintf(stderr, "Usage:\t%s [-cdorstvC] LINK|DIR ...\n\n", progname);
 	fprintf(stderr, "Flags:"
 		"\t-c == change absolute/messy links to relative\n"
 		"\t-d == delete dangling links\n"
-		"\t-o == warn about links across file systems\n"
+		"\t-o == also process links which cross file systems\n"
 		"\t-r == recurse into subdirs\n"
 		"\t-s == shorten lengthy links (displayed in output only when -c not specified)\n"
 		"\t-t == show what would be done by -c\n"
-		"\t-v == verbose (show all symlinks)\n\n");
+		"\t-v == verbose (show all symlinks)\n"
+		"\t-C == chroot to current directory beforehand\n\n");
 	exit(1);
 }
 
 int main(int argc, char **argv)
 {
 	static char path[PATH_MAX+2], cwd[PATH_MAX+2];
-	int dircount = 0;
+	int argcount = 0, initialized = 0;
 	char c, *p;
 
 	if  ((progname = (char *) strrchr(*argv, '/')) == NULL)
                 progname = *argv;
         else
                 progname++;
-
-	if (NULL == getcwd(cwd,PATH_MAX)) {
-		fprintf(stderr,"getcwd() failed\n");
-		exit (1);
-	}
-	if (!*cwd || cwd[strlen(cwd)-1] != '/')
-		strcat(cwd,"/");
 
 	while (--argc) {
 		p = *++argv;
@@ -340,10 +344,24 @@ int main(int argc, char **argv)
 				else if (c == 's')	shorten   = 1;
 				else if (c == 't')	testing   = 1;
 				else if (c == 'v')	verbose   = 1;
+				else if (c == 'C')	do_chroot = 1;
 				else			usage_error();
 			}
 		} else {
 			struct stat st;
+			if (!initialized) {
+				initialized = 1;
+				if (do_chroot && chroot(".")) {
+					perror("chroot()");
+					exit (1);
+				}
+				if (NULL == getcwd(cwd, PATH_MAX)) {
+					fprintf(stderr,"getcwd() failed\n");
+					exit (1);
+				}
+				if (!*cwd || cwd[strlen(cwd)-1] != '/')
+					strcat(cwd, "/");
+			}
 			if (*p == '/')
 				*path = '\0';
 			else
@@ -351,12 +369,16 @@ int main(int argc, char **argv)
 			tidy_path(strcat(path, p));
 			if (lstat(path, &st) == -1)
 				perror(path);
-			else
+			else if (S_ISLNK(st.st_mode))
+				fix_symlink (path, st.st_dev);
+			else if (S_ISDIR(st.st_mode))
 				dirwalk(path, strlen(path), st.st_dev);
-			++dircount;
+			else
+				fprintf(stdout, "%s: not a symlink or a directory, skipped.\n", path);
+			++argcount;
 		}
 	}
-	if (dircount == 0)
+	if (argcount == 0)
 		usage_error();
 	exit (0);
 }

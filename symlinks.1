@@ -1,13 +1,13 @@
-.TH SYMLINKS 8 "October 2008" "Version 1.4"
+.TH SYMLINKS 1 "Jan 2020" "Version 1.7"
 
 .SH NAME
 symlinks \- symbolic link maintenance utility
 .SH SYNOPSIS
 .B symlinks
 [
-.B -cdorstv
+.B -cdorstvC
 ]
-dirlist
+.I LINK|DIR\fR ...
 .SH DESCRIPTION
 .BI symlinks
 is a useful utility for maintainers of FTP sites, CDROMs,
@@ -110,6 +110,11 @@ show all symbolic links.  By default,
 links are not shown unless 
 .B -v
 is specified.
+.TP
+.I -C
+chroot to current directory before looking at dirlist.
+You need to be root for the chroot() call to work,
+and all paths given as args must be relative to the current directory.
 .PP
 .SH BUGS
 .B symlinks
